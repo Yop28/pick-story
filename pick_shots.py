@@ -63,11 +63,21 @@ def main():
         print(f"Error: No valid shot picking rules found in '{pick_file}'.", file=sys.stderr)
         sys.exit(1)
         
-    # Sort mappings by target global index
+    # Sort mappings by target global index, preserving parse order for ties
     pick_mappings.sort(key=lambda x: x[0])
-    print(f"Parsed {len(pick_mappings)} pick rules from '{pick_file}':")
-    for t_idx, p_num, s_idx in pick_mappings:
-        print(f"  Target Global Shot {t_idx} <- preset-{p_num}.json's Global Shot {s_idx}")
+    
+    # Assign a new unique sequential shotNumber to every entry (1-based, no gaps)
+    # and compute the per-original-target candidate suffix (-1, -2, ...)
+    candidate_counter = {}  # target_global_idx -> running count
+    enriched_mappings = []  # (new_shot_number, candidate_idx, target_global_idx, preset_num, source_global_idx)
+    for new_shot_num, (t_idx, p_num, s_idx) in enumerate(pick_mappings, start=1):
+        candidate_counter[t_idx] = candidate_counter.get(t_idx, 0) + 1
+        cand_idx = candidate_counter[t_idx]
+        enriched_mappings.append((new_shot_num, cand_idx, t_idx, p_num, s_idx))
+    
+    print(f"Parsed {len(enriched_mappings)} pick rules from '{pick_file}':")
+    for new_num, cand_idx, t_idx, p_num, s_idx in enriched_mappings:
+        print(f"  shotNumber {new_num} (shotId={t_idx}-{cand_idx})  [orig target={t_idx}] <- preset-{p_num}.json's Global Shot {s_idx}")
         
     # Load required presets and cache their shot counts
     presets_cache = {}
@@ -93,7 +103,7 @@ def main():
     for s in template_scenes:
         s["shots"] = []
         
-    for target_global_idx, preset_num, source_global_idx in pick_mappings:
+    for new_shot_num, cand_idx, target_global_idx, preset_num, source_global_idx in enriched_mappings:
         try:
             # Map target_global_idx to template scene to know where to insert it
             target_scene_idx, _ = map_global_to_local(target_global_idx, template_shot_counts)
@@ -122,12 +132,31 @@ def main():
             print(f"Error: Could not retrieve shot index {source_local_idx} in scene {source_scene_idx} of preset-{preset_num}.json", file=sys.stderr)
             sys.exit(1)
             
-        # Deep-copy the source shot, then overwrite shotNumber with the target global index (A)
+        # Deep-copy the source shot.
+        # shotNumber: globally unique sequential number (1, 2, 3, ...)
+        # shotId:     "{shotNumber}-{candidate_index}" — identifies which candidate this is
+        #             for a given original pick.txt target number.
         copied_shot = copy.deepcopy(src_shot)
-        copied_shot["shotNumber"] = target_global_idx  # A값 그대로 (shotId는 소스 원본 유지)
+        
+        # Build an ordered dict so shotId appears right after shotNumber.
+        # shotId format: "{pick.txt target number}-{candidate index}"
+        # e.g. pick.txt target=1 with 2 candidates → shotId "1-1", "1-2"
+        ordered_shot = {}
+        for key, val in copied_shot.items():
+            if key == "shotNumber":
+                ordered_shot["shotNumber"] = new_shot_num
+                ordered_shot["shotId"] = f"{target_global_idx}-{cand_idx}"
+            elif key == "shotId":
+                pass  # drop any existing shotId from source; already inserted above
+            else:
+                ordered_shot[key] = val
+        # In case the source shot had no shotNumber key at all, ensure both fields exist
+        if "shotNumber" not in ordered_shot:
+            ordered_shot["shotNumber"] = new_shot_num
+            ordered_shot["shotId"] = f"{target_global_idx}-{cand_idx}"
         
         # Append the copied shot to the target scene
-        template_scenes[target_scene_idx]["shots"].append(copied_shot)
+        template_scenes[target_scene_idx]["shots"].append(ordered_shot)
         
     # Write the output file using the next available version number
     # Option 3 chosen: auto-increment version number based on existing files
