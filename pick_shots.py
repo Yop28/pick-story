@@ -63,9 +63,7 @@ def main():
         print(f"Error: No valid shot picking rules found in '{pick_file}'.", file=sys.stderr)
         sys.exit(1)
         
-    # Sort mappings by target global index, preserving parse order for ties
-    pick_mappings.sort(key=lambda x: x[0])
-    
+    # Preserve exact line order from pick.txt without sorting (Option B)
     # Assign a new unique sequential shotNumber to every entry (1-based, no gaps)
     # and compute the per-original-target candidate suffix (-1, -2, ...)
     candidate_counter = {}  # target_global_idx -> running count
@@ -77,7 +75,7 @@ def main():
     
     print(f"Parsed {len(enriched_mappings)} pick rules from '{pick_file}':")
     for new_num, cand_idx, t_idx, p_num, s_idx in enriched_mappings:
-        print(f"  shotNumber {new_num} (shotId={t_idx}-{cand_idx})  [orig target={t_idx}] <- preset-{p_num}.json's Global Shot {s_idx}")
+        print(f"  Line {new_num}: shotNumber {t_idx} (shotId={p_num}-{s_idx}) <- preset-{p_num}.json's Global Shot {s_idx}")
         
     # Load required presets and cache their shot counts
     presets_cache = {}
@@ -97,20 +95,23 @@ def main():
         presets_cache[preset_num] = (p_data, p_shot_counts)
         return presets_cache[preset_num]
 
-    # Reconstruct the shots inside target storyboard scenes
-    # Option 2 chosen: only reconstruct with specified shots
-    # Clear the shots array of each scene in template
-    for s in template_scenes:
-        s["shots"] = []
+    # Reconstruct shots inside a single consolidated storyboard scene (Option B: continuous sequence)
+    single_scene = copy.deepcopy(template_scenes[0])
+    single_scene["sceneNumber"] = 1
+    titles = [s.get("sceneTitle", "") for s in template_scenes if s.get("sceneTitle")]
+    if len(titles) > 1:
+        single_scene["sceneTitle"] = " / ".join(titles)
+    summaries = [s.get("sceneSummary", "") for s in template_scenes if s.get("sceneSummary")]
+    if summaries:
+        single_scene["sceneSummary"] = " ".join(summaries)
+    all_narratives = [s.get("narrativeContent", "") for s in template_scenes if s.get("narrativeContent")]
+    if all_narratives:
+        single_scene["narrativeContent"] = "\n\n".join(all_narratives)
+    single_scene["shots"] = []
+    
+    template_data["storyboard"] = [single_scene]
         
     for new_shot_num, cand_idx, target_global_idx, preset_num, source_global_idx in enriched_mappings:
-        try:
-            # Map target_global_idx to template scene to know where to insert it
-            target_scene_idx, _ = map_global_to_local(target_global_idx, template_shot_counts)
-        except IndexError as e:
-            print(f"Error mapping target global shot {target_global_idx}: {e}", file=sys.stderr)
-            sys.exit(1)
-            
         try:
             # Load source preset
             source_data, source_shot_counts = load_preset(preset_num)
@@ -133,30 +134,25 @@ def main():
             sys.exit(1)
             
         # Deep-copy the source shot.
-        # shotNumber: globally unique sequential number (1, 2, 3, ...)
-        # shotId:     "{shotNumber}-{candidate_index}" — identifies which candidate this is
-        #             for a given original pick.txt target number.
+        # shotNumber: target shot index from pick.txt (e.g. 4 for 4:1-8)
+        # shotId:     source preset and shot index (e.g. "1-8" for 4:1-8)
         copied_shot = copy.deepcopy(src_shot)
         
-        # Build an ordered dict so shotId appears right after shotNumber.
-        # shotId format: "{pick.txt target number}-{candidate index}"
-        # e.g. pick.txt target=1 with 2 candidates → shotId "1-1", "1-2"
         ordered_shot = {}
         for key, val in copied_shot.items():
             if key == "shotNumber":
-                ordered_shot["shotNumber"] = new_shot_num
-                ordered_shot["shotId"] = f"{target_global_idx}-{cand_idx}"
+                ordered_shot["shotNumber"] = target_global_idx
+                ordered_shot["shotId"] = f"{preset_num}-{source_global_idx}"
             elif key == "shotId":
                 pass  # drop any existing shotId from source; already inserted above
             else:
                 ordered_shot[key] = val
-        # In case the source shot had no shotNumber key at all, ensure both fields exist
         if "shotNumber" not in ordered_shot:
-            ordered_shot["shotNumber"] = new_shot_num
-            ordered_shot["shotId"] = f"{target_global_idx}-{cand_idx}"
+            ordered_shot["shotNumber"] = target_global_idx
+            ordered_shot["shotId"] = f"{preset_num}-{source_global_idx}"
         
-        # Append the copied shot to the target scene
-        template_scenes[target_scene_idx]["shots"].append(ordered_shot)
+        # Append the copied shot to the single consolidated scene
+        single_scene["shots"].append(ordered_shot)
         
     # Write the output file using the next available version number
     # Option 3 chosen: auto-increment version number based on existing files
